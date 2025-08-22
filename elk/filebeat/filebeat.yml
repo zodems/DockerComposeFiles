@@ -1,0 +1,33 @@
+strict.perms: false
+
+filebeat.inputs:
+  # 1) Mevcut test klasörü
+  - type: filestream
+    id: local-logs
+    enabled: true
+    paths:
+      - /logs/*.log
+
+  # 2) Windows host'tan D:\Logs
+  - type: filestream
+    id: win-host-logs
+    enabled: true
+    paths:
+      - /host-logs/**/*.log   # alt klasörler dahil
+    parsers:
+      - multiline:             # (opsiyonel) Java/.NET stacktrace için örnek
+          type: pattern
+          pattern: '^\s|^\tat |^\[|^[0-9]{4}-[0-9]{2}-[0-9]{2}T'  # ihtiyaca göre düzenle
+          negate: false
+          match: after
+          timeout: 5s
+
+output.logstash:
+  hosts: ["${LOGSTASH_HOST}"]
+  username: "${ELASTIC_USER}"
+  password: "${ELASTIC_PASSWORD}"
+
+setup.kibana:
+  host: "http://kibana:5601"
+  username: "admin"
+  password: "${ADMIN_PASSWORD}"

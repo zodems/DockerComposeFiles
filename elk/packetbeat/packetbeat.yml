@@ -1,0 +1,12 @@
+packetbeat.interfaces.device: any
+
+packetbeat.protocols:
+  - type: http
+    ports: [80, 8080, 8000, 5000, 9200]
+  - type: dns
+    ports: [53]
+
+output.logstash:
+  hosts: ["${LOGSTASH_HOST}"]
+  username: "${ELASTIC_USER}"
+  password: "${ELASTIC_PASSWORD}"

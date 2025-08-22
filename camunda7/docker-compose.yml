@@ -1,0 +1,65 @@
+services:
+  postgres:
+    image: postgres:${POSTGRES_VERSION:-latest}
+    container_name: ${DB_CONTAINER_NAME:-PostgreSQL}
+    environment:
+      POSTGRES_USER: ${DB_USER:-root}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-123456Sa}
+      POSTGRES_DB: ${DB_NAME:-camunda}
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      # İlk açılışta çalıştırılacak SQL dosyalarınız (Camunda şeması dahil)
+      - ./sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-root} -d ${DB_NAME:-camunda}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  camunda:
+    image: ${CAMUNDA_IMAGE:-camunda/camunda-bpm-platform:run-latest}
+    container_name: ${CAMUNDA_CONTAINER_NAME:-Camunda}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # --- JDBC Ayarları ---
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${DB_NAME:-camunda}
+      SPRING_DATASOURCE_USERNAME: ${DB_USER:-root}
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-123456Sa}
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+
+      # --- Camunda ayarları ---
+      CAMUNDA_BPM_DATABASE_TYPE: postgres
+      # SQL'leri /sql klasöründen yüklediğiniz için otomatik schema update kapalı:
+      CAMUNDA_BPM_DATABASE_SCHEMA_UPDATE: "false"
+      # (İlk kurulumda Camunda'nın şemayı kendi oluşturmasını isterseniz geçici olarak "true" yapıp
+      #  ayağa kalktıktan sonra tekrar "false" yapabilirsiniz.)
+
+      # Teşhis amaçlı açmak isterseniz:
+      # SPRING_APPLICATION_JSON: '{"debug":true}'
+      
+      # --- Camunda Run modülleri (UI ve REST için gerekli) ---
+      CAMUNDA_BPM_RUN_WEBAPPS_ENABLED: "true"
+      CAMUNDA_BPM_RUN_REST_ENABLED: "true"
+      # Geliştirme için auth kapalı; gerekiyorsa açın:
+      CAMUNDA_BPM_RUN_AUTH_ENABLED: "false"
+      # Auth açarsanız şunları ekleyin:
+      # SPRING_SECURITY_USER_NAME: admin
+      # SPRING_SECURITY_USER_PASSWORD: admin
+
+      # Teşhis istiyorsanız açın:
+      # SPRING_APPLICATION_JSON: '{"debug":true}'
+
+    volumes:
+      # PostgreSQL JDBC sürücüsü: gerçek dosya adıyla mount edin
+      - ./drivers/postgresql-42.7.4.jar:/camunda/configuration/userlib/postgresql-42.7.4.jar:ro
+    ports:
+      - "${CAMUNDA_HTTP_PORT:-8080}:8080"
+    restart: unless-stopped
+
+volumes:
+  pg_data:

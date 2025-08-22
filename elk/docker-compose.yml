@@ -1,0 +1,203 @@
+name: elk-stack
+
+networks:
+  elk:
+
+volumes:
+  esdata:
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.1.2
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=false
+      - xpack.security.transport.ssl.enabled=false
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -u elastic:${ELASTIC_PASSWORD} http://localhost:9200/_cluster/health | grep -q '\"status\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+    networks: [elk]
+    restart: unless-stopped
+
+  setup:
+    image: curlimages/curl:8.9.1
+    container_name: elk-setup
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      ES_URL: ${ES_URL}
+      ELASTIC_USER: ${ELASTIC_USER}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      KIBANA_SYSTEM_PASSWORD: ${KIBANA_SYSTEM_PASSWORD}
+      LOGSTASH_INTERNAL_PASSWORD: ${LOGSTASH_INTERNAL_PASSWORD}
+      ADMIN_USER: ${ADMIN_USER}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+    command: >
+      sh -c '
+        set -eu
+        retry() { i=0; until "$@"; do i=$((i+1)); [ $i -ge 40 ] && exit 1; echo "Retry $i..."; sleep 3; done; }
+        echo "Wait ES security endpoint ready..."
+        retry curl -s -u "$ELASTIC_USER:$ELASTIC_PASSWORD" "$ES_URL/_security/_authenticate" >/dev/null
+        echo "Set kibana_system password..."
+        retry curl -s -u "$ELASTIC_USER:$ELASTIC_PASSWORD" -H "Content-Type: application/json" -X POST \
+          "$ES_URL/_security/user/kibana_system/_password" -d "{\"password\":\"$KIBANA_SYSTEM_PASSWORD\"}" >/dev/null
+        echo "Create/Update role logstash_writer..."
+        retry curl -s -u "$ELASTIC_USER:$ELASTIC_PASSWORD" -H "Content-Type: application/json" -X POST \
+          "$ES_URL/_security/role/logstash_writer" \
+          -d "{\"cluster\":[\"manage_index_templates\",\"monitor\",\"manage_ilm\"],\"indices\":[{\"names\":[\"logstash-*\"],\"privileges\":[\"write\",\"create\",\"create_index\",\"manage\",\"manage_ilm\"]}]}" >/dev/null
+        echo "Create/Update user logstash_internal..."
+        retry curl -s -u "$ELASTIC_USER:$ELASTIC_PASSWORD" -H "Content-Type: application/json" -X POST \
+          "$ES_URL/_security/user/logstash_internal" \
+          -d "{\"password\":\"$LOGSTASH_INTERNAL_PASSWORD\",\"roles\":[\"logstash_writer\"],\"full_name\":\"Logstash internal\"}" >/dev/null
+        echo "Create/Update admin superuser..."
+        retry curl -s -u "$ELASTIC_USER:$ELASTIC_PASSWORD" -H "Content-Type: application/json" -X POST \
+          "$ES_URL/_security/user/$ADMIN_USER" \
+          -d "{\"password\":\"$ADMIN_PASSWORD\",\"roles\":[\"superuser\"],\"full_name\":\"Admin\"}" >/dev/null
+        echo "Setup finished."
+      '
+    networks: [elk]
+    restart: "no"
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:9.1.2
+    container_name: kibana
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      setup:
+        condition: service_completed_successfully
+    environment:
+      - SERVER_NAME=kibana
+      - ELASTICSEARCH_HOSTS=${ES_URL}
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=${KIBANA_SYSTEM_PASSWORD}
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=Q3h7yP6fB2t9mA1kR5u8Z0aC4d7W0n2L
+      - XPACK_SECURITY_ENCRYPTIONKEY=Zp7nV3kqL9s0aH2bE6m1T4yR8u5cX0wD
+      - XPACK_REPORTING_ENCRYPTIONKEY=Ab9dE4fG7hJ2kL5mN8pQ1rS3tU6vW0xZ
+    ports:
+      - "5601:5601"
+    networks: [elk]
+    restart: unless-stopped
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:9.1.2
+    container_name: logstash
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      setup:
+        condition: service_completed_successfully
+    environment:
+      - LS_JAVA_OPTS=-Xms512m -Xmx512m
+      - ELASTIC_USER=logstash_internal
+      - ELASTIC_PASSWORD=${LOGSTASH_INTERNAL_PASSWORD}
+    volumes:
+      - ./logstash/pipeline/logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+    ports:
+      - "5044:5044"        # Beats
+      - "5000:5000/tcp"    # TCP input
+      - "5000:5000/udp"    # UDP input (istersen)
+      - "9600:9600"        # Logstash monitoring API
+    networks: [elk]
+    restart: unless-stopped
+    
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:9.1.2
+    container_name: filebeat
+    user: root
+    volumes:
+      - ./filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - ./filebeat/logs:/logs:ro
+      - D:/Logs:/host-logs:ro     # <-- Windows host klasörü (D:\Logs) mount
+    environment:
+      - ELASTIC_USER=logstash_internal
+      - ELASTIC_PASSWORD=${LOGSTASH_INTERNAL_PASSWORD}
+      - LOGSTASH_HOST=logstash:5044
+    command: ["-e", "--strict.perms=false"]   # <-- düzeltildi (çift tire)
+    depends_on:
+      - logstash
+    networks: [elk]
+    restart: unless-stopped
+    
+  metricbeat:
+    image: docker.elastic.co/beats/metricbeat:9.1.2
+    container_name: metricbeat
+    user: root
+    volumes:
+      - ./metricbeat/metricbeat.yml:/usr/share/metricbeat/metricbeat.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys/fs/cgroup:/hostfs/sys/fs/cgroup:ro
+      - /proc:/hostfs/proc:ro
+      - /:/hostfs:ro
+    environment:
+      - LOGSTASH_HOST=logstash:5044
+      - ELASTIC_USER=logstash_internal
+      - ELASTIC_PASSWORD=${LOGSTASH_INTERNAL_PASSWORD}
+    command: ["-e", "--strict.perms=false"]
+    depends_on:
+      - logstash
+    networks: [elk]
+    restart: unless-stopped
+
+  packetbeat:
+    image: docker.elastic.co/beats/packetbeat:9.1.2
+    container_name: packetbeat
+    cap_add: ["NET_ADMIN", "NET_RAW"]
+    volumes:
+      - ./packetbeat/packetbeat.yml:/usr/share/packetbeat/packetbeat.yml:ro
+    environment:
+      - LOGSTASH_HOST=logstash:5044
+      - ELASTIC_USER=logstash_internal
+      - ELASTIC_PASSWORD=${LOGSTASH_INTERNAL_PASSWORD}
+    command: ["-e", "--strict.perms=false"]
+    depends_on:
+      - logstash
+    networks: [elk]
+    restart: unless-stopped
+
+  #auditbeat:
+  # image: docker.elastic.co/beats/auditbeat:9.1.2
+  # container_name: auditbeat
+  # user: root
+  # volumes:
+  #   - ./auditbeat/auditbeat.yml:/usr/share/auditbeat/auditbeat.yml:ro
+  # environment:
+  #   - LOGSTASH_HOST=logstash:5044
+  #   - ELASTIC_USER=logstash_internal
+  #   - ELASTIC_PASSWORD=${LOGSTASH_INTERNAL_PASSWORD}
+  # command: ["-e", "--strict.perms=false"]
+  # depends_on:
+  #   - logstash
+  # networks: [elk]
+  # restart: unless-stopped
+
+  heartbeat:
+    image: docker.elastic.co/beats/heartbeat:9.1.2
+    container_name: heartbeat
+    volumes:
+      - ./heartbeat/heartbeat.yml:/usr/share/heartbeat/heartbeat.yml:ro
+    environment:
+      - LOGSTASH_HOST=logstash:5044
+      - ELASTIC_USER=logstash_internal
+      - ELASTIC_PASSWORD=${LOGSTASH_INTERNAL_PASSWORD}
+    command: ["-e", "--strict.perms=false"]
+    depends_on:
+      - logstash
+    networks: [elk]
+    restart: unless-stopped

@@ -1,0 +1,13 @@
+heartbeat.monitors:
+  - type: http
+    schedule: '@every 30s'
+    urls: ["http://elasticsearch:9200", "http://kibana:5601"]
+
+  - type: icmp
+    schedule: '@every 30s'
+    hosts: ["elasticsearch", "logstash", "kibana"]
+
+output.logstash:
+  hosts: ["${LOGSTASH_HOST}"]
+  username: "${ELASTIC_USER}"
+  password: "${ELASTIC_PASSWORD}"
